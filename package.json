@@ -1,7 +1,7 @@
 {
   "name": "dialai",
   "version": "1.0.0",
-  "description": "DialAI – General Purpose Voice AI Assistant powered by ElevenLabs + Exotel",
+  "description": "DialAI – General Purpose Voice AI Assistant powered by ElevenLabs + Gemini 1.5 powered by ElevenLabs + Exotel",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

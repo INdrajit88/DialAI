@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * DialAI Bharat – In-Memory Response Cache
+ * DialAI DialAI – In-Memory Response Cache
  *
  * Caches AI responses keyed on a normalised transcript hash so that
  * repeated identical (or near-identical) queries skip the ElevenLabs

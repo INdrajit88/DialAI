@@ -3,7 +3,7 @@
 /**
  * audioConverter.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Handles all audio format conversions for DialAI Bharat.
+ * Handles all audio format conversions for DialAI DialAI.
  *
  * Pipeline:
  *   Twilio  ──► mulaw 8 kHz  ──► PCM 16-bit 16 kHz ──► ElevenLabs

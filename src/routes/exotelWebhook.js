@@ -3,7 +3,7 @@
 /**
  * exotelWebhook.js
  * ─────────────────────────────────────────────────────────────────────────────
- * Express routes for all Exotel HTTP callbacks – India-first telephony.
+ * Express routes for all Exotel HTTP callbacks – General-purpose telephony.
  *
  * Endpoints
  * ─────────
@@ -455,7 +455,7 @@ router.get('/test', (req, res) => {
 
   const sample = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <!-- DialAI Bharat – Exotel ExoML (test mode) -->
+  <!-- DialAI DialAI – Exotel ExoML (test mode) -->
   <Connect>
     <Stream url="${wsUrl}">
       <Parameter name="callSid"  value="EXtest123"/>

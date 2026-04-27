@@ -3,7 +3,7 @@
 /**
  * testScenarios.js
  * ─────────────────────────────────────────────────────────────────────────────
- * DialAI Bharat – Test Scenarios Runner
+ * DialAI DialAI – Test Scenarios Runner
  *
  * Simulates all four primary use-case domains without placing a real phone call.
  * Exercises the language detector, tool handlers, cache layer, and audio
@@ -491,9 +491,9 @@ const SCENARIOS = [
 
   {
     id: 'govt-02', domain: 'govt', lang: 'hi',
-    title: '🏛️ Ayushman Bharat scheme info',
+    title: '🏛️ Ayushman DialAI scheme info',
     async run() {
-      const result = await handleGetSchemeInfo({ scheme_name: 'Ayushman Bharat' });
+      const result = await handleGetSchemeInfo({ scheme_name: 'Ayushman DialAI' });
       assert(result.full_name !== undefined,           'Has full_name');
       assert(result.benefit.includes('5 lakh') ||
              result.benefit.includes('₹5'),           'Mentions ₹5 lakh benefit');
@@ -839,7 +839,7 @@ const SCENARIOS = [
       assert(typeof payload.conversation_config.tts   === 'object', 'Has tts config');
       assert(typeof payload.conversation_config.agent.prompt === 'object', 'Has prompt object');
       assert(typeof payload.conversation_config.agent.prompt.prompt === 'string', 'Has prompt string');
-      assert(payload.name.includes('Saathi'), 'Agent name includes "Saathi"');
+      assert(payload.name.includes('Nova'), 'Agent name includes "Nova"');
     },
   },
 
@@ -905,7 +905,7 @@ const DOMAIN_LABELS = {
 
 async function runAll() {
   console.log(head('═══════════════════════════════════════════════════'));
-  console.log(head('   DialAI Bharat – Test Scenarios Runner'));
+  console.log(head('   DialAI DialAI – Test Scenarios Runner'));
   console.log(head('═══════════════════════════════════════════════════'));
 
   if (FILTER_DOMAIN || FILTER_LANG) {
@@ -958,7 +958,7 @@ async function runAll() {
   console.log('');
 
   if (failed === 0) {
-    console.log(`${C.green}${C.bold}✔ All ${total} tests passed! DialAI Bharat is ready.${C.reset}`);
+    console.log(`${C.green}${C.bold}✔ All ${total} tests passed! DialAI DialAI is ready.${C.reset}`);
     console.log(`${C.dim}  Next step: Run  npx ngrok http 3000  and configure your Twilio number.${C.reset}`);
   } else {
     console.log(`${C.red}${C.bold}✘ ${failed} test(s) failed. Please review output above.${C.reset}`);
