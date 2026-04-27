@@ -19,8 +19,8 @@ class BridgeSession {
 
   async start(data) {
     try {
-      this.sid = data.streamSid || data.stream_sid;
-      log.info('Media Stream Started Event', { sid: this.sid });
+      this.sid = data.streamSid || data.stream_sid || 'unknown';
+      log.info('Media Stream Started', { sid: this.sid });
       
       await runWithCallContext({ callSid: this.sid }, async () => {
         log.info('Connecting to ElevenLabs...');
@@ -42,7 +42,7 @@ class BridgeSession {
         this._drain();
       });
     } catch (err) {
-      log.error('BridgeSession Start Error', { err: err.message, stack: err.stack });
+      log.error('BridgeSession Start Error', { err: err.message });
       this.stop('start-error');
     }
   }
@@ -59,21 +59,14 @@ class BridgeSession {
           }));
           this.ts += 20;
         }
-      } catch (err) {
-        log.error('Drain Error', { err: err.message });
-      }
+      } catch (err) { }
     }, 20);
   }
 
   stop(reason) {
     clearInterval(this.timer);
-    if (this.el) {
-      try { this.el.close(); } catch(e) {}
-      this.el = null;
-    }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try { this.ws.close(); } catch(e) {}
-    }
+    if (this.el) { this.el.close(); this.el = null; }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) { this.ws.close(); }
     log.info('Stream Stopped', { reason, sid: this.sid });
   }
 }
@@ -82,7 +75,7 @@ function createBridge(httpServer) {
   const wss = new WebSocket.Server({ server: httpServer, path: '/media-stream' });
   
   wss.on('connection', (ws, req) => {
-    log.info('New WebSocket Connection Established', { 
+    log.info('EXOTEL CONNECTED TO WEBSOCKET', { 
       ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
       url: req.url 
     });
@@ -92,6 +85,12 @@ function createBridge(httpServer) {
     ws.on('message', async (data) => {
       try {
         const msg = JSON.parse(data.toString());
+        // Handle 'connected' event which some providers send before 'start'
+        if (msg.event === 'connected') {
+          log.info('Exotel Handshake: Connected');
+          return;
+        }
+        
         if (msg.event === 'start') {
           await session.start(msg.start);
         } else if (msg.event === 'media') {
@@ -103,19 +102,12 @@ function createBridge(httpServer) {
           session.stop('telephony-stop');
         }
       } catch (err) {
-        log.error('WebSocket Message Processing Error', { err: err.message, data: data.toString().slice(0, 100) });
+        log.error('WS Processing Error', { err: err.message });
       }
     });
 
-    ws.on('close', (code, reason) => {
-      log.info('WebSocket Connection Closed', { code, reason: reason.toString() });
-      session.stop('ws-closed');
-    });
-
-    ws.on('error', (err) => {
-      log.error('WebSocket Error', { err: err.message });
-      session.stop('ws-error');
-    });
+    ws.on('close', () => session.stop('ws-closed'));
+    ws.on('error', (err) => log.error('WS Error', { err: err.message }));
   });
 
   return wss;

@@ -35,6 +35,15 @@ async function main() {
     const wss = createBridge(httpServer, { path: "/media-stream" });
     registerStatsProvider(getBridgeStats);
 
+    // DEBUG: Log every WebSocket upgrade request
+    httpServer.on('upgrade', (req, socket, head) => {
+      log.info('Incoming WebSocket Upgrade Request', { 
+        url: req.url, 
+        host: req.headers.host,
+        ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress
+      });
+    });
+
     httpServer.listen(PORT, "0.0.0.0", () => {
       log.info(`🚀 DialAI is LIVE on Railway`);
       log.info(`🔗 URL: ${SERVER_URL}`);

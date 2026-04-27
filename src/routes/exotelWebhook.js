@@ -7,21 +7,25 @@ const router = express.Router();
 const log = logger.forModule('exotelWebhook');
 
 router.get('/incoming', (req, res) => {
-  const serverUrl = process.env.SERVER_URL || `https://${req.get('host')}`;
-  const wsUrl = serverUrl.replace(/^https?:\/\//, 'wss://') + '/media-stream';
+  const host = req.headers.host;
+  const wsUrl = `wss://${host}:443/media-stream`;
   
-  log.info('Exotel Voicebot Request', { sid: req.query.CallSid, wsUrl });
+  log.info('Exotel Voicebot Request Received', { 
+    sid: req.query.CallSid, 
+    returningUrl: wsUrl 
+  });
   
-  // Return the simple JSON format that Exotel Voicebot expects
-  res.status(200).json({ url: wsUrl });
+  // Explicitly set content type to application/json
+  res.header('Content-Type', 'application/json');
+  res.status(200).send(JSON.stringify({ url: wsUrl }));
 });
 
 router.post('/incoming', (req, res) => {
-  const serverUrl = process.env.SERVER_URL || `https://${req.get('host')}`;
-  const wsUrl = serverUrl.replace(/^https?:\/\//, 'wss://') + '/media-stream';
+  const host = req.headers.host;
+  const wsUrl = `wss://${host}:443/media-stream`;
   const callSid = req.body.CallSid || 'unknown';
 
-  log.info('Exotel Passthru Request', { sid: callSid });
+  log.info('Exotel Passthru Request Received', { sid: callSid });
 
   const response = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
