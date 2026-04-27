@@ -69,6 +69,9 @@ class BridgeSession {
   }
 
   _startDrainLoop() {
+    let lastLogTime = 0;
+    let packetsSent = 0;
+    
     // 20ms pacing loop to send audio in smooth 80ms packets
     this.timer = setInterval(() => {
       try {
@@ -78,7 +81,10 @@ class BridgeSession {
         // Wait for initial prefill before starting playback (prevents first-word chop)
         if (!this.isDraining && this.queue.length >= this.prefillNeeded) {
           this.isDraining = true;
-          log.debug('Draining started', { queueLength: this.queue.length });
+          log.info('Draining started', { 
+            queueLength: this.queue.length,
+            streamSid: this.sid
+          });
         }
 
         // Only send if we've started draining AND have at least 1 chunk available
@@ -91,6 +97,8 @@ class BridgeSession {
 
           if (chunksToCombine.length > 0) {
             const combined = Buffer.concat(chunksToCombine);
+            // Duration = audio length in bytes / (8000 samples/sec) * 1000 ms
+            // At 8kHz mulaw, 1 byte = 1 sample
             const duration = Math.round((combined.length / 8000) * 1000);
             
             if (this.ws.readyState === WebSocket.OPEN) {
@@ -103,13 +111,35 @@ class BridgeSession {
                 }
               }));
               this.ts += duration;
+              packetsSent++;
+              
+              // Log every 50 packets or every 10 seconds for debugging
+              const now = Date.now();
+              if (packetsSent % 50 === 0 || (now - lastLogTime) > 10000) {
+                log.debug('Audio streaming active', {
+                  packetsSent,
+                  queueLength: this.queue.length,
+                  timestampMs: this.ts,
+                  chunkSize: combined.length
+                });
+                lastLogTime = now;
+              }
             } else {
-              log.warn('WebSocket not open, cannot send audio', { wsState: this.ws.readyState });
+              log.error('WebSocket not open, cannot send audio', { 
+                wsState: this.ws.readyState,
+                packetsSent,
+                queueLength: this.queue.length
+              });
             }
           }
         }
       } catch (err) {
-        log.error('Drain loop error', { err: err.message, stack: err.stack });
+        log.error('Drain loop error', { 
+          err: err.message, 
+          stack: err.stack,
+          packetsSent,
+          queueLength: this.queue.length
+        });
       }
     }, 80); // Run every 80ms to match the 80ms chunks
   }
