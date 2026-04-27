@@ -5,7 +5,6 @@ const { logger, runWithCallContext } = require('../utils/logger');
 const {
   mulawToLinear16,
   base64PCMToBase64Mulaw,
-  normaliseVolume,
 } = require('../utils/audioConverter');
 const { createSession }  = require('./elevenLabsAgentService');
 const { callHandler }    = require('./callHandler');
@@ -43,11 +42,12 @@ class BridgeSession {
     this._audioAccumulator  = [];
     this._accumulatorBytes  = 0;
     this._flushTimer        = null;
-    this._outboundQueue     = []; // Stores 20ms Buffers
+    this._outboundQueue     = []; 
     this._outboundTimer     = null;
     this._log = logger.forModule('BridgeSession');
     this._outboundChunk = 1;
     this._outboundTimestampMs = 0;
+    this._hasStartedDraining = false;
   }
 
   async onStart(startPayload) {
@@ -62,13 +62,14 @@ class BridgeSession {
     if (this.isStopped || !this.isStarted || !mediaPayload.payload) return;
     try {
       const mulawBuf = Buffer.from(mediaPayload.payload, 'base64');
-      const pcmBuf = mulawToLinear16(mulawBuf);
-      const normalised = normaliseVolume(pcmBuf, 3500);
-      this._audioAccumulator.push(normalised);
-      this._accumulatorBytes += normalised.length;
+      const pcmBuf = mulawToLinear16(mulawBuf); // 8k -> 16k
+      
+      this._audioAccumulator.push(pcmBuf);
+      this._accumulatorBytes += pcmBuf.length;
+      
       if (this._accumulatorBytes >= 6400) this._flush();
       else if (!this._flushTimer) this._flushTimer = setTimeout(() => this._flush(), AUDIO_FLUSH_INTERVAL_MS);
-    } catch (e) { this._log.error('Media error', { err: e.message }); }
+    } catch (e) { this._log.error('Inbound Error', { err: e.message }); }
   }
 
   _flush() {
@@ -89,9 +90,12 @@ class BridgeSession {
         if (!fullOutboundBase64) return;
         
         const fullBuf = Buffer.from(fullOutboundBase64, 'base64');
-        // Slice into 20ms chunks (160 bytes) and store as Buffers
+        // Strictly slice into 20ms (160 byte) chunks for the phone network
         for (let i = 0; i < fullBuf.length; i += 160) {
-          this._outboundQueue.push(fullBuf.slice(i, i + 160));
+          const chunk = fullBuf.slice(i, i + 160);
+          if (chunk.length === 160) {
+            this._outboundQueue.push(chunk.toString('base64'));
+          }
         }
       });
       this.elSession.on('close', () => this.destroy('elevenlabs-closed'));
@@ -100,37 +104,32 @@ class BridgeSession {
   }
 
   _startOutboundDrain() {
-    // JITTER PROTECTION: Send 60ms of audio every 60ms.
-    // Larger chunks are much more stable over the public internet.
-    const DRAIN_MS = 60; 
-    const BYTES_NEEDED = 480; // 60ms * 8 samples/ms
-
+    // Exactly 20ms interval for telephony sync
     this._outboundTimer = setInterval(() => {
       if (this.isStopped) return;
       
-      let chunksToCombine = [];
-      let bytesCollected = 0;
+      // Jitter Buffer: wait for 5 chunks (100ms) before starting to drain
+      // this ensures we always have audio ready even if the internet hiccups.
+      if (!this._hasStartedDraining && this._outboundQueue.length < 5) return;
+      this._hasStartedDraining = true;
 
-      while (this._outboundQueue.length > 0 && bytesCollected < BYTES_NEEDED) {
-        const chunk = this._outboundQueue.shift();
-        chunksToCombine.push(chunk);
-        bytesCollected += chunk.length;
-      }
-
-      if (chunksToCombine.length > 0) {
-        const combinedPayload = Buffer.concat(chunksToCombine).toString('base64');
+      const payload = this._outboundQueue.shift();
+      if (payload && this.twilioWs.readyState === WebSocket.OPEN) {
         this.twilioWs.send(JSON.stringify({
           event: 'media',
-          stream_sid: this.streamSid,
+          streamSid: this.streamSid,   // CamelCase
+          stream_sid: this.streamSid,  // SnakeCase (for Exotel)
           media: { 
-            payload: combinedPayload, 
+            payload, 
             chunk: String(this._outboundChunk++), 
             timestamp: String(this._outboundTimestampMs) 
           }
         }));
-        this._outboundTimestampMs += Math.round((bytesCollected / 8000) * 1000);
+        this._outboundTimestampMs += 20;
+      } else if (this._outboundQueue.length === 0) {
+        this._hasStartedDraining = false; // Reset if we run out of audio
       }
-    }, DRAIN_MS);
+    }, 20);
   }
 
   destroy(reason = 'unknown') {
@@ -157,7 +156,7 @@ function createBridge(httpServer, { path = '/media-stream' } = {}) {
         if (msg.event === 'start') await session.onStart(msg.start);
         else if (msg.event === 'media') session.onMedia(msg.media);
         else if (msg.event === 'stop') session.destroy('telephony-stop');
-      } catch (e) { /* ignore */ }
+      } catch (e) { }
     });
     ws.on('close', () => session.destroy('ws-closed'));
   });
