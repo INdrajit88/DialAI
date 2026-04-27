@@ -429,9 +429,9 @@ function handleFallbackWebhook(req, res) {
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say language="hi-IN">
-    Khed hai, abhi kuch technical samasya aa rahi hai.
-    Kripya 2 minute baad dobara call karein. Dhanyavaad.
+  <Say language="en-US">
+    I am sorry, but there is a technical issue.
+    Please call back in 2 minutes. Thank you.
   </Say>
   <Pause length="1"/>
   <Hangup/>
@@ -478,9 +478,9 @@ router.get('/test', (req, res) => {
 function buildErrorExoML() {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say language="hi-IN">
-    Khed hai, abhi kuch technical samasya aa rahi hai.
-    Kripya thodi der baad dobara call karein. Dhanyavaad.
+  <Say language="en-US">
+    I am sorry, but there is a technical issue.
+    Please call back later. Thank you.
   </Say>
   <Pause length="1"/>
   <Hangup/>

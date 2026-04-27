@@ -172,7 +172,7 @@ class CallHandler extends EventEmitter {
   _buildBusyExoML() {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say language="hi-IN">Sabhi lines busy hain. Kripya baad mein call karein.</Say>
+  <Say language="en-US">All lines are busy. Please call back later.</Say>
   <Hangup/>
 </Response>`.trim();
   }

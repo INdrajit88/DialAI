@@ -5,20 +5,15 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-// ── Environment ───────────────────────────────────────────────────────────────
 require("dotenv").config();
-
-// ── Core Node modules ─────────────────────────────────────────────────────────
 const http = require("http");
+const path = require("path");
 const process = require("process");
-
-// ── Third-party ───────────────────────────────────────────────────────────────
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 
-// ── Internal modules ──────────────────────────────────────────────────────────
 const { logger } = require("./utils/logger");
 const { router: exotelRouter } = require("./routes/exotelWebhook");
 const {
@@ -33,8 +28,6 @@ const { ensureAgent } = require("./services/elevenLabsAgentService");
 
 const log = logger.forModule("server");
 
-// ─── Configuration ─────────────────────────────────────────────────────────────
-
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PROD = NODE_ENV === "production";
@@ -42,34 +35,15 @@ const SERVER_URL = (
   process.env.SERVER_URL || `http://localhost:${PORT}`
 ).replace(/\/$/, "");
 
-// ─── Environment validation ────────────────────────────────────────────────────
-
 function validateEnv() {
   const REQUIRED = ["ELEVENLABS_API_KEY", "EXOTEL_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN"];
-
-  const RECOMMENDED = [
-    "SERVER_URL",
-    "EXOTEL_CALLER_ID",
-    "ELEVENLABS_AGENT_ID",
-    "ELEVENLABS_VOICE_ID",
-  ];
-
   const missing = REQUIRED.filter((k) => !process.env[k]);
-  const absent = RECOMMENDED.filter((k) => !process.env[k]);
-
   if (missing.length > 0) {
     log.error("Missing REQUIRED environment variables", { missing });
     if (IS_PROD) throw new Error(`Missing required env vars: ${missing.join(", ")}`);
   }
-
-  if (absent.length > 0) {
-    log.warn("Missing RECOMMENDED environment variables", { absent });
-  }
-
   log.info("Environment validated", { NODE_ENV, PORT, SERVER_URL });
 }
-
-// ─── Express application ───────────────────────────────────────────────────────
 
 function createApp() {
   const app = express();
@@ -82,40 +56,24 @@ function createApp() {
   const morganFormat = IS_PROD ? "combined" : "dev";
   app.use(morgan(morganFormat, { stream: { write: (msg) => log.http(msg.trim()) } }));
 
-  app.use((req, _res, next) => {
-    req.requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    next();
-  });
+  // ── Serve Dashboard ─────────────────────────────────────────────────────────
+  app.use(express.static(path.join(__dirname, "..", "public")));
 
-  // ── Routes ──────────────────────────────────────────────────────────────────
   app.use("/health", healthRouter);
   app.use("/exotel", exotelRouter);
 
+  // Fallback for SPA or simple index
   app.get("/", (_req, res) => {
-    res.json({
-      service: "DialAI",
-      status: "running",
-      endpoints: {
-        health: `${SERVER_URL}/health`,
-        exotel_incoming: `${SERVER_URL}/exotel/incoming`,
-        media_stream_ws: SERVER_URL.replace(/^https?:\/\//, "wss://") + "/media-stream",
-      }
-    });
-  });
-
-  app.use((req, res) => {
-    res.status(404).json({ error: "not_found" });
+    res.sendFile(path.join(__dirname, "..", "public", "index.html"));
   });
 
   app.use((err, req, res, _next) => {
     log.error("Server error", { message: err.message, path: req.path });
-    res.status(err.status || 500).json({ error: "internal_error", requestId: req.requestId });
+    res.status(err.status || 500).json({ error: "internal_error" });
   });
 
   return app;
 }
-
-// ─── Graceful shutdown ─────────────────────────────────────────────────────────
 
 function setupGracefulShutdown(httpServer, wss) {
   async function shutdown(signal) {
@@ -128,8 +86,6 @@ function setupGracefulShutdown(httpServer, wss) {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-// ─── Main bootstrap ────────────────────────────────────────────────────────────
-
 async function main() {
   try {
     validateEnv();
@@ -139,7 +95,7 @@ async function main() {
     registerStatsProvider(getBridgeStats);
 
     httpServer.listen(PORT, "0.0.0.0", () => {
-      log.info(`✅ Server running on port ${PORT}`);
+      log.info(`✅ Server is LIVE on Railway at: ${SERVER_URL}`);
     });
 
     if (process.env.ELEVENLABS_API_KEY) {
