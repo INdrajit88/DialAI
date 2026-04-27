@@ -43,7 +43,7 @@ class BridgeSession {
     this._audioAccumulator  = [];
     this._accumulatorBytes  = 0;
     this._flushTimer        = null;
-    this._outboundQueue     = [];
+    this._outboundQueue     = []; // Stores 20ms Buffers
     this._outboundTimer     = null;
     this._log = logger.forModule('BridgeSession');
     this._outboundChunk = 1;
@@ -88,13 +88,10 @@ class BridgeSession {
         const fullOutboundBase64 = base64PCMToBase64Mulaw(base64PCM, sampleRate);
         if (!fullOutboundBase64) return;
         
-        // CRITICAL: Slice larger audio blocks into 20ms (160 byte) chunks
         const fullBuf = Buffer.from(fullOutboundBase64, 'base64');
+        // Slice into 20ms chunks (160 bytes) and store as Buffers
         for (let i = 0; i < fullBuf.length; i += 160) {
-          const chunk = fullBuf.slice(i, i + 160);
-          if (chunk.length > 0) {
-            this._outboundQueue.push(chunk.toString('base64'));
-          }
+          this._outboundQueue.push(fullBuf.slice(i, i + 160));
         }
       });
       this.elSession.on('close', () => this.destroy('elevenlabs-closed'));
@@ -103,18 +100,37 @@ class BridgeSession {
   }
 
   _startOutboundDrain() {
+    // JITTER PROTECTION: Send 60ms of audio every 60ms.
+    // Larger chunks are much more stable over the public internet.
+    const DRAIN_MS = 60; 
+    const BYTES_NEEDED = 480; // 60ms * 8 samples/ms
+
     this._outboundTimer = setInterval(() => {
       if (this.isStopped) return;
-      const payload = this._outboundQueue.shift();
-      if (payload && this.twilioWs.readyState === WebSocket.OPEN) {
+      
+      let chunksToCombine = [];
+      let bytesCollected = 0;
+
+      while (this._outboundQueue.length > 0 && bytesCollected < BYTES_NEEDED) {
+        const chunk = this._outboundQueue.shift();
+        chunksToCombine.push(chunk);
+        bytesCollected += chunk.length;
+      }
+
+      if (chunksToCombine.length > 0) {
+        const combinedPayload = Buffer.concat(chunksToCombine).toString('base64');
         this.twilioWs.send(JSON.stringify({
           event: 'media',
           stream_sid: this.streamSid,
-          media: { payload, chunk: String(this._outboundChunk++), timestamp: String(this._outboundTimestampMs) }
+          media: { 
+            payload: combinedPayload, 
+            chunk: String(this._outboundChunk++), 
+            timestamp: String(this._outboundTimestampMs) 
+          }
         }));
-        this._outboundTimestampMs += 20; // Exactly 20ms per 160-byte chunk
+        this._outboundTimestampMs += Math.round((bytesCollected / 8000) * 1000);
       }
-    }, 20);
+    }, DRAIN_MS);
   }
 
   destroy(reason = 'unknown') {
@@ -141,7 +157,7 @@ function createBridge(httpServer, { path = '/media-stream' } = {}) {
         if (msg.event === 'start') await session.onStart(msg.start);
         else if (msg.event === 'media') session.onMedia(msg.media);
         else if (msg.event === 'stop') session.destroy('telephony-stop');
-      } catch (e) { /* ignore parse error */ }
+      } catch (e) { /* ignore */ }
     });
     ws.on('close', () => session.destroy('ws-closed'));
   });
