@@ -29,13 +29,33 @@ class BridgeSession {
         log.info('Nova Ready');
 
         this.el.on('audio', (pcm, id, rate) => {
-          const mulaw = base64PCMToBase64Mulaw(pcm, rate);
-          if (!mulaw) return;
-          const buf = Buffer.from(mulaw, 'base64');
-          
-          // Slice into standard 20ms chunks
-          for (let i = 0; i < buf.length; i += 160) {
-            this.queue.push(buf.slice(i, i + 160));
+          try {
+            if (!pcm) {
+              log.warn('Received empty audio from ElevenLabs', { id });
+              return;
+            }
+            
+            const mulaw = base64PCMToBase64Mulaw(pcm, rate || 16000);
+            if (!mulaw) {
+              log.warn('Failed to convert audio', { id, rate, pcmLength: pcm.length });
+              return;
+            }
+            
+            const buf = Buffer.from(mulaw, 'base64');
+            if (buf.length === 0) {
+              log.warn('Mulaw buffer is empty', { id });
+              return;
+            }
+            
+            // Slice into standard 20ms chunks (160 bytes at 8kHz)
+            let chunkCount = 0;
+            for (let i = 0; i < buf.length; i += 160) {
+              this.queue.push(buf.slice(i, i + 160));
+              chunkCount++;
+            }
+            log.debug('Audio enqueued', { id, rate, chunks: chunkCount, queueLength: this.queue.length });
+          } catch (err) {
+            log.error('Audio processing error', { err: err.message, id, rate });
           }
         });
 
@@ -58,6 +78,7 @@ class BridgeSession {
         // Wait for initial prefill before starting playback (prevents first-word chop)
         if (!this.isDraining && this.queue.length >= this.prefillNeeded) {
           this.isDraining = true;
+          log.debug('Draining started', { queueLength: this.queue.length });
         }
 
         // Only send if we've started draining AND have at least 1 chunk available
@@ -82,10 +103,14 @@ class BridgeSession {
                 }
               }));
               this.ts += duration;
+            } else {
+              log.warn('WebSocket not open, cannot send audio', { wsState: this.ws.readyState });
             }
           }
         }
-      } catch (err) { }
+      } catch (err) {
+        log.error('Drain loop error', { err: err.message, stack: err.stack });
+      }
     }, 80); // Run every 80ms to match the 80ms chunks
   }
 
@@ -108,10 +133,16 @@ function createBridge(httpServer) {
         const msg = JSON.parse(data.toString());
         if (msg.event === 'start') await session.start(msg.start);
         else if (msg.event === 'media' && session.el) {
-          const pcm = mulawToLinear16(Buffer.from(msg.media.payload, 'base64'));
-          session.el.sendAudio(pcm.toString('base64'));
+          try {
+            const pcm = mulawToLinear16(Buffer.from(msg.media.payload, 'base64'));
+            session.el.sendAudio(pcm.toString('base64'));
+          } catch (audioErr) {
+            log.error('Audio conversion error', { err: audioErr.message });
+          }
         } else if (msg.event === 'stop') session.stop('telephony-stop');
-      } catch (e) {}
+      } catch (e) {
+        log.error('Message parsing error', { err: e.message });
+      }
     });
     ws.on('close', () => session.stop('ws-closed'));
   });

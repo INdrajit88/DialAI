@@ -104,21 +104,40 @@ class ElevenLabsSession extends EventEmitter {
       });
 
       this.ws.on("message", (data) => {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === "conversation_initiation_metadata") {
-          this.conversationId = msg.conversation_initiation_metadata_event?.conversation_id;
-          this.emit("metadata", this.conversationId);
-          resolve();
-        } else if (msg.type === "audio") {
-          this.emit("audio", msg.audio_event?.audio_base_64, msg.audio_event?.event_id, 16000);
-        } else if (msg.type === "user_transcript") {
-          const text = msg.user_transcription_event?.user_transcript;
-          if (text) {
-            this._transcriptBuffer += " " + text;
-            const detectedLang = detectLanguage(this._transcriptBuffer.trim());
-            if (detectedLang !== this.language) this.language = detectedLang;
-            this.emit("transcript", text, this.language);
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "conversation_initiation_metadata") {
+            this.conversationId = msg.conversation_initiation_metadata_event?.conversation_id;
+            log.info('Conversation initiated', { conversationId: this.conversationId });
+            this.emit("metadata", this.conversationId);
+            resolve();
+          } else if (msg.type === "audio") {
+            const audioData = msg.audio_event?.audio_base_64;
+            const eventId = msg.audio_event?.event_id;
+            const sampleRate = msg.audio_event?.sample_rate || 16000;
+            
+            if (!audioData) {
+              log.warn('Received audio event with no data', { eventId });
+              return;
+            }
+            
+            log.debug('Audio event from ElevenLabs', { 
+              eventId, 
+              sampleRate, 
+              dataLength: audioData.length 
+            });
+            this.emit("audio", audioData, eventId, sampleRate);
+          } else if (msg.type === "user_transcript") {
+            const text = msg.user_transcription_event?.user_transcript;
+            if (text) {
+              this._transcriptBuffer += " " + text;
+              const detectedLang = detectLanguage(this._transcriptBuffer.trim());
+              if (detectedLang !== this.language) this.language = detectedLang;
+              this.emit("transcript", text, this.language);
+            }
           }
+        } catch (err) {
+          log.error('Message parsing error from ElevenLabs', { err: err.message });
         }
       });
 
