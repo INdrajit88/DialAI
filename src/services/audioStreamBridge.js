@@ -15,8 +15,6 @@ class BridgeSession {
     this.queue = [];
     this.timer = null;
     this.ts = 0;
-    this.prefillNeeded = 6; // Wait for 120ms (6 * 20ms) before starting to speak
-    this.isDraining = false;
     this.drainStartTime = 0;
     this.totalPackets = 0;
   }
@@ -30,22 +28,47 @@ class BridgeSession {
         this.el = await createSession({ callSid: this.sid });
         log.info('Nova Ready');
 
+        // CRITICAL: Track if we receive ANY audio events
+        let audioEventCount = 0;
+
         this.el.on('audio', (pcm, id, rate) => {
+          audioEventCount++;
+          log.info(`📥 AUDIO EVENT #${audioEventCount}`, { 
+            eventId: id, 
+            sampleRate: rate,
+            pcmBase64Length: pcm ? pcm.length : 0,
+            pcmIsNull: !pcm,
+            pcmIsEmpty: pcm && pcm.length === 0
+          });
+
           try {
             if (!pcm) {
-              log.warn('⚠️ Received empty audio from ElevenLabs', { id });
+              log.error('🚨 CRITICAL: Audio data is NULL', { id });
               return;
             }
             
+            if (pcm.length === 0) {
+              log.error('🚨 CRITICAL: Audio data is EMPTY STRING', { id });
+              return;
+            }
+
+            log.info(`🔄 Converting PCM (${pcm.length} chars)`, { id, rate });
+            
             const mulaw = base64PCMToBase64Mulaw(pcm, rate || 16000);
             if (!mulaw) {
-              log.warn('⚠️ Failed to convert audio - returned null', { id, rate, pcmLength: pcm.length });
+              log.error('🚨 CRITICAL: Conversion returned null/empty', { 
+                id, 
+                rate, 
+                pcmLength: pcm.length 
+              });
               return;
             }
             
             const buf = Buffer.from(mulaw, 'base64');
+            log.info(`✅ Mulaw converted: ${buf.length} bytes`, { id });
+            
             if (buf.length === 0) {
-              log.warn('⚠️ Mulaw buffer is empty after decode', { id });
+              log.error('🚨 CRITICAL: Mulaw buffer is empty after decode', { id });
               return;
             }
             
@@ -55,15 +78,17 @@ class BridgeSession {
               this.queue.push(buf.slice(i, i + 160));
               chunkCount++;
             }
-            log.info(`✓ Audio enqueued (${chunkCount} chunks)`, { 
+            log.info(`✓ Audio enqueued: ${chunkCount} chunks (${buf.length} bytes → queue now ${this.queue.length} items)`, { 
               id, 
-              rate, 
-              pcmLength: pcm.length,
-              bufLength: buf.length,
-              queueLength: this.queue.length 
+              rate
             });
           } catch (err) {
-            log.error('❌ Audio processing error', { err: err.message, id, rate, stack: err.stack });
+            log.error('🚨 CRITICAL: Audio processing error', { 
+              err: err.message, 
+              id, 
+              rate, 
+              stack: err.stack 
+            });
           }
         });
 
@@ -86,27 +111,35 @@ class BridgeSession {
     }
   }
 
-  _startDrainLoop() {
+   _startDrainLoop() {
     let lastLogTime = 0;
+    let drainLoopRuns = 0;
     
-    // 20ms pacing loop to send audio in smooth 80ms packets
+    // 80ms pacing loop to send audio in smooth 80ms packets
     this.timer = setInterval(() => {
+      drainLoopRuns++;
+      
       try {
         if (this.isStopped) return;
 
-        // JITTER BUFFER LOGIC:
-        // Wait for initial prefill before starting playback (prevents first-word chop)
-        if (!this.isDraining && this.queue.length >= this.prefillNeeded) {
-          this.isDraining = true;
-          this.drainStartTime = Date.now();
-          log.info('🟢 Draining started', { 
+        // Log status every 1 second
+        if (drainLoopRuns % 12 === 0) {
+          log.info('📊 Drain loop status', {
             queueLength: this.queue.length,
-            streamSid: this.sid
+            packetsStreamed: this.totalPackets,
+            wsOpen: this.ws.readyState === WebSocket.OPEN
           });
         }
 
-        // Only send if we've started draining AND have at least 1 chunk available
-        if (this.isDraining && this.queue.length > 0) {
+        // Send audio as soon as we have chunks (NO prefill requirement - causes delays!)
+        if (this.queue.length > 0) {
+          // Mark first audio as started
+          if (this.totalPackets === 0) {
+            log.info('🟢 Audio streaming STARTED (first packet)', { 
+              queueLength: this.queue.length
+            });
+          }
+
           // Group up to 4 chunks into one 80ms packet for stable streaming
           let chunksToCombine = [];
           for (let i = 0; i < 4 && this.queue.length > 0; i++) {
@@ -116,10 +149,9 @@ class BridgeSession {
           if (chunksToCombine.length > 0) {
             const combined = Buffer.concat(chunksToCombine);
             // Duration = audio length in bytes / (8000 samples/sec) * 1000 ms
-            // At 8kHz mulaw, 1 byte = 1 sample
             const duration = Math.round((combined.length / 8000) * 1000);
             
-            if (this.ws.readyState === WebSocket.OPEN) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
               this.ws.send(JSON.stringify({
                 event: 'media',
                 stream_sid: this.sid,
@@ -131,30 +163,29 @@ class BridgeSession {
               this.ts += duration;
               this.totalPackets++;
               
-              // Log every 50 packets or every 10 seconds for debugging
-              const now = Date.now();
-              if (this.totalPackets % 50 === 0 || (now - lastLogTime) > 10000) {
-                log.info('📊 Audio streaming active', {
+              // Log every 50 packets for debugging
+              if (this.totalPackets % 50 === 0) {
+                log.info('📊 Audio packets sent', {
                   packetsStreamed: this.totalPackets,
                   queueLength: this.queue.length,
                   timestampMs: this.ts,
                   chunkSize: combined.length
                 });
-                lastLogTime = now;
               }
             } else {
-              log.error('❌ WebSocket not open, cannot send audio', { 
-                wsState: this.ws.readyState,
-                packetsStreamed: this.totalPackets,
-                queueLength: this.queue.length
-              });
+              if (this.totalPackets > 0) {  // Only log if we've sent something
+                log.error('🚨 WebSocket closed during streaming', { 
+                  wsState: this.ws ? this.ws.readyState : 'undefined',
+                  packetsStreamed: this.totalPackets,
+                  queueRemaining: this.queue.length
+                });
+              }
             }
           }
         }
       } catch (err) {
-        log.error('❌ Drain loop error', { 
-          err: err.message, 
-          stack: err.stack,
+        log.error('🚨 Drain loop error', { 
+          err: err.message,
           packetsStreamed: this.totalPackets,
           queueLength: this.queue.length
         });
