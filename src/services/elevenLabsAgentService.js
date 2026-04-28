@@ -148,6 +148,28 @@ class ElevenLabsSession extends EventEmitter {
               if (detectedLang !== this.language) this.language = detectedLang;
               this.emit("transcript", text, this.language);
             }
+          } else if (msg.type === "agent_response") {
+            const responseText = msg.agent_response_event?.agent_response;
+            if (responseText) {
+              log.info(`🤖 AGENT: ${responseText}`);
+            }
+          } else if (msg.type === "ping") {
+            const eventId =
+              msg.ping_event?.ping_id ||
+              msg.ping_event?.event_id ||
+              msg.event_id;
+            const pongPayload = {
+              type: "pong",
+              event_id: eventId || 0,
+            };
+            log.debug("Sending pong", pongPayload);
+            this._sendJSON(pongPayload);
+          } else if (msg.type === "internal_tentative_agent_response") {
+            // Log but don't treat as unhandled
+            log.debug("ElevenLabs tentative response", {
+              text: msg.tentative_agent_response_internal_event
+                ?.tentative_agent_response,
+            });
           } else {
             log.info("ElevenLabs unhandled message type:", {
               type: msg.type,
@@ -161,7 +183,11 @@ class ElevenLabsSession extends EventEmitter {
         }
       });
 
-      this.ws.on("close", () => {
+      this.ws.on("close", (code, reason) => {
+        log.warn("ElevenLabs WebSocket closed", {
+          code,
+          reason: reason.toString(),
+        });
         if (!this._isClosed) this.emit("close");
       });
 

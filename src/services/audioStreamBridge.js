@@ -1,241 +1,213 @@
-"use strict";
+'use strict';
 
-const WebSocket = require("ws");
-const { logger, runWithCallContext } = require("../utils/logger");
+const WebSocket = require('ws');
+const { logger, runWithCallContext } = require('../utils/logger');
 const {
-  mulawToLinear16,
-  base64PCMToBase64Mulaw,
-} = require("../utils/audioConverter");
-const { createSession } = require("./elevenLabsAgentService");
+  base64PCM8kToBase64PCM16k,
+  base64PCM16kToBase64PCM8k,
+  base64PCM24kToBase64PCM16k,
+  computeRMS,
+  normaliseVolume,
+} = require('../utils/audioConverter');
+const { createSession }  = require('./elevenLabsAgentService');
+const { callHandler }    = require('./callHandler');
+const cache              = require('../utils/cache');
 
-const log = logger.forModule("audioStreamBridge");
+const log = logger.forModule('audioStreamBridge');
+
+const AUDIO_FLUSH_INTERVAL_MS = 100;
+const MAX_WS_PER_IP           = 5;
+const MAX_CONCURRENT_CALLS    = 50;
+const SPEECH_DETECTION_THRESHOLD = 250;
+const EXOTEL_FRAME_MS = 100;
+const EXOTEL_PCM16_8K_FRAME_BYTES = 1600; // 100 ms * 8000 samples/s * 2 bytes/sample
+
+const ipConnections = new Map();
+
+function incrementIpCount(ip) {
+  const count = (ipConnections.get(ip) || 0) + 1;
+  ipConnections.set(ip, count);
+  return count;
+}
+
+function decrementIpCount(ip) {
+  const count = Math.max(0, (ipConnections.get(ip) || 0) - 1);
+  if (count === 0) ipConnections.delete(ip);
+  else ipConnections.set(ip, count);
+}
 
 class BridgeSession {
-  constructor(ws) {
-    this.ws = ws;
-    this.sid = null;
-    this.el = null;
-    this.queue = [];
-    this.timer = null;
-    this.ts = 0;
-    this.drainStartTime = 0;
-    this.totalPackets = 0;
+  constructor(twilioWs, clientIp, provider = 'exotel', mediaSampleRate = 8000) {
+    this.twilioWs   = twilioWs;
+    this.clientIp   = clientIp;
+    this.provider   = provider;
+    this.mediaSampleRate = mediaSampleRate;
+    this.streamSid  = null;
+    this.callSid    = null;
+    this.callerNum  = null;
+    this.elSession  = null;
+    this.isStarted     = false;
+    this.isStopped     = false;
+    this.isELConnected = false;
+    this.language   = process.env.DEFAULT_LANGUAGE || 'hi';
+    this._audioAccumulator  = [];
+    this._accumulatorBytes  = 0;
+    this._flushTimer        = null;
+    this._outboundQueue     = [];
+    this._outboundTimer     = null;
+    this._inboundFrames     = 0;
+    this._speechFrames      = 0;
+    this._agentSpeaking     = false;
+    this._log = logger.forModule('BridgeSession');
+    this._outboundSequence = 1;
+    this._outboundChunk = 1;
+    this._outboundTimestampMs = 0;
+    this._lastInboundSequence = 0;
   }
 
-  async start(data) {
-    try {
-      this.sid = data.streamSid || data.stream_sid || "unknown";
-      log.info("Media Stream Started", { sid: this.sid });
+  async onTwilioStart(startPayload) {
+    const customParameters = startPayload.customParameters || startPayload.custom_parameters || {};
+    this.streamSid  = startPayload.streamSid || startPayload.stream_sid;
+    this.callSid    = startPayload.callSid || startPayload.call_sid;
+    this.callerNum  = customParameters.callerNumber || customParameters.caller_number || startPayload.from || null;
+    this.provider   = 'exotel';
+    this.mediaSampleRate = 8000;
+    this.isStarted  = true;
 
-      await runWithCallContext({ callSid: this.sid }, async () => {
-        this.el = await createSession({ callSid: this.sid });
-        log.info("Nova Ready");
-
-        // CRITICAL: Track if we receive ANY audio events
-        let audioEventCount = 0;
-
-        this.el.on("audio", (pcm, id, rate) => {
-          audioEventCount++;
-          log.info(`📥 AUDIO EVENT #${audioEventCount}`, {
-            eventId: id,
-            sampleRate: rate,
-            pcmBase64Length: pcm ? pcm.length : 0,
-            pcmIsNull: !pcm,
-            pcmIsEmpty: pcm && pcm.length === 0,
-          });
-
-          try {
-            if (!pcm) {
-              log.error("🚨 CRITICAL: Audio data is NULL", { id });
-              return;
-            }
-
-            if (pcm.length === 0) {
-              log.error("🚨 CRITICAL: Audio data is EMPTY STRING", { id });
-              return;
-            }
-
-            log.info(`🔄 Converting PCM (${pcm.length} chars)`, { id, rate });
-
-            const mulaw = base64PCMToBase64Mulaw(pcm, rate || 16000);
-            if (!mulaw) {
-              log.error("🚨 CRITICAL: Conversion returned null/empty", {
-                id,
-                rate,
-                pcmLength: pcm.length,
-              });
-              return;
-            }
-
-            const buf = Buffer.from(mulaw, "base64");
-            log.info(`✅ Mulaw converted: ${buf.length} bytes`, { id });
-
-            if (buf.length === 0) {
-              log.error("🚨 CRITICAL: Mulaw buffer is empty after decode", {
-                id,
-              });
-              return;
-            }
-
-            // Slice into standard 20ms chunks (160 bytes at 8kHz)
-            let chunkCount = 0;
-            for (let i = 0; i < buf.length; i += 160) {
-              this.queue.push(buf.slice(i, i + 160));
-              chunkCount++;
-            }
-            log.info(
-              `✓ Audio enqueued: ${chunkCount} chunks (${buf.length} bytes → queue now ${this.queue.length} items)`,
-              {
-                id,
-                rate,
-              },
-            );
-          } catch (err) {
-            log.error("🚨 CRITICAL: Audio processing error", {
-              err: err.message,
-              id,
-              rate,
-              stack: err.stack,
-            });
-          }
-        });
-
-        this.el.on("close", () => {
-          const drainedSeconds = (Date.now() - this.drainStartTime) / 1000;
-          const packetsTotal = this.totalPackets || 0;
-          log.warn("🔴 ElevenLabs connection CLOSED", {
-            reason: "el-closed",
-            drainedFor: `${drainedSeconds.toFixed(2)}s`,
-            packetsStreamed: packetsTotal,
-            queueRemaining: this.queue.length,
-          });
-          this.stop("el-closed");
-        });
-        this._startDrainLoop();
-      });
-    } catch (err) {
-      log.error("Start Error", { err: err.message });
-      this.stop("start-error");
-    }
+    this._log.info('Media stream started', { callSid: this.callSid, provider: this.provider });
+    await runWithCallContext({ callSid: this.callSid }, () => this._connectElevenLabs());
   }
 
-  _startDrainLoop() {
-    let drainLoopRuns = 0;
-
-    // 20ms pacing loop to send audio in smooth 20ms packets (160 bytes of 8kHz mu-law)
-    this.timer = setInterval(() => {
-      drainLoopRuns++;
-
-      try {
-        if (this.isStopped) return;
-
-        // Log status occasionally
-        if (drainLoopRuns % 50 === 0) {
-          log.info("📊 Drain loop status", {
-            queueLength: this.queue.length,
-            packetsStreamed: this.totalPackets,
-            wsOpen: this.ws.readyState === WebSocket.OPEN,
-          });
-        }
-
-        // Send audio as soon as we have chunks
-        if (this.queue.length > 0) {
-          // Mark first audio as started
-          if (this.totalPackets === 0) {
-            log.info("🟢 Audio streaming STARTED (first packet)", {
-              queueLength: this.queue.length,
-            });
-          }
-
-          // Send one 20ms chunk (160 bytes)
-          const chunk = this.queue.shift();
-
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(
-              JSON.stringify({
-                event: "media",
-                streamSid: this.sid,
-                media: {
-                  payload: chunk.toString("base64"),
-                  timestamp: String(this.ts),
-                },
-              }),
-            );
-            this.ts += 20; // Each chunk is 20ms (160 bytes at 8kHz)
-            this.totalPackets++;
-
-            // Log every 50 packets for debugging
-            if (this.totalPackets % 50 === 0) {
-              log.info("📊 Audio packets sent", {
-                packetsStreamed: this.totalPackets,
-                queueLength: this.queue.length,
-                timestampMs: this.ts,
-                chunkSize: chunk.length,
-              });
-            }
-          } else {
-            if (this.totalPackets > 0) {
-              log.error("🚨 WebSocket closed during streaming", {
-                wsState: this.ws ? this.ws.readyState : "undefined",
-                packetsStreamed: this.totalPackets,
-                queueRemaining: this.queue.length,
-              });
-            }
-          }
-        }
-      } catch (err) {
-        log.error("🚨 Drain loop error", {
-          err: err.message,
-          packetsStreamed: this.totalPackets,
-          queueLength: this.queue.length,
-        });
-      }
-    }, 20); // Run every 20ms to match the 20ms chunks
+  onTwilioMedia(mediaPayload) {
+    if (this.isStopped || !this.isStarted) return;
+    const base64Audio = mediaPayload.payload;
+    if (base64Audio) this._accumulateAudio(base64Audio);
   }
 
-  stop(reason) {
+  onTwilioStop() {
+    this.destroy('telephony-stop');
+  }
+
+  noteInboundSequence(seq) {
+    const parsed = parseInt(seq, 10);
+    if (parsed > this._lastInboundSequence) this._lastInboundSequence = parsed;
+  }
+
+  destroy(reason = 'unknown') {
+    if (this.isStopped) return;
     this.isStopped = true;
-    clearInterval(this.timer);
-    if (this.el) {
-      this.el.close();
-      this.el = null;
+    clearTimeout(this._flushTimer);
+    clearInterval(this._outboundTimer);
+    if (this.elSession) this.elSession.close();
+    if (this.twilioWs) this.twilioWs.close();
+    if (this.clientIp) decrementIpCount(this.clientIp);
+    this._log.info('Bridge session destroyed', { callSid: this.callSid, reason });
+  }
+
+  async _connectElevenLabs() {
+    try {
+      this.elSession = await createSession({ callSid: this.callSid, callerNumber: this.callerNum, language: this.language });
+      this.isELConnected = true;
+      this.elSession.on('audio', (base64PCM, _id, sampleRate) => this._onElevenLabsAudio(base64PCM, sampleRate));
+      this.elSession.on('close', () => this.destroy('elevenlabs-closed'));
+      this._startOutboundDrain();
+    } catch (err) {
+      this._log.error('Failed to connect ElevenLabs', { err: err.message });
+      this.destroy('elevenlabs-failed');
     }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.close();
+  }
+
+  _accumulateAudio(base64Audio) {
+    const inboundPcm8k = Buffer.from(base64Audio, 'base64');
+    if (inboundPcm8k.length === 0) return;
+
+    if (this._inboundFrames < 5) {
+      this._log.debug('Exotel inbound audio frame', {
+        callSid: this.callSid,
+        bytes: inboundPcm8k.length,
+        rms: Math.round(computeRMS(inboundPcm8k)),
+        encoding: 'pcm_s16le_8000',
+      });
     }
-    log.info("Stream Stopped", { reason });
+
+    const base64PCM = base64PCM8kToBase64PCM16k(base64Audio);
+    if (!base64PCM) return;
+    const pcmBuf = Buffer.from(base64PCM, 'base64');
+    const normalised = normaliseVolume(pcmBuf, 3000);
+    this._audioAccumulator.push(normalised);
+    this._accumulatorBytes += normalised.length;
+    this._inboundFrames++;
+    // Flush more frequently to reduce latency and buffering
+    if (this._accumulatorBytes >= 3200) this._flushAudioToElevenLabs();
+    else if (!this._flushTimer) this._flushTimer = setTimeout(() => this._flushAudioToElevenLabs(), AUDIO_FLUSH_INTERVAL_MS);
+  }
+
+  _flushAudioToElevenLabs() {
+    clearTimeout(this._flushTimer);
+    this._flushTimer = null;
+    if (this._audioAccumulator.length === 0 || !this.isELConnected) return;
+    const combined = Buffer.concat(this._audioAccumulator);
+    this.elSession.sendAudio(combined.toString('base64'));
+    this._audioAccumulator = [];
+    this._accumulatorBytes = 0;
+  }
+
+  _onElevenLabsAudio(base64PCM, sampleRate) {
+    let pcm16kBase64 = base64PCM;
+    if (sampleRate === 24000) {
+      pcm16kBase64 = base64PCM24kToBase64PCM16k(base64PCM);
+    } else if (sampleRate !== 16000) {
+      this._log.warn('Unexpected ElevenLabs output sample rate for Exotel bridge', {
+        callSid: this.callSid,
+        sampleRate,
+      });
+    }
+
+    const outboundBase64 = base64PCM16kToBase64PCM8k(pcm16kBase64);
+    if (!outboundBase64) return;
+
+    const outboundPcm8k = Buffer.from(outboundBase64, 'base64');
+    for (let offset = 0; offset < outboundPcm8k.length; offset += EXOTEL_PCM16_8K_FRAME_BYTES) {
+      const frame = outboundPcm8k.subarray(offset, offset + EXOTEL_PCM16_8K_FRAME_BYTES);
+      this._outboundQueue.push(frame.toString('base64'));
+    }
+  }
+
+  _startOutboundDrain() {
+    this._outboundTimer = setInterval(() => {
+      if (this.twilioWs.readyState === WebSocket.OPEN && this._outboundQueue.length > 0) {
+        const payload = this._outboundQueue.shift();
+        if (payload) {
+          this.twilioWs.send(JSON.stringify({
+            event: 'media',
+            stream_sid: this.streamSid,
+            media: { payload, chunk: String(this._outboundChunk++), timestamp: String(this._outboundTimestampMs) }
+          }));
+          this._outboundTimestampMs += EXOTEL_FRAME_MS;
+        }
+      }
+    }, EXOTEL_FRAME_MS);
   }
 }
 
-function createBridge(httpServer) {
-  const wss = new WebSocket.Server({
-    server: httpServer,
-    path: "/media-stream",
-  });
-  wss.on("connection", (ws) => {
-    log.info("EXOTEL CONNECTED");
-    const session = new BridgeSession(ws);
-    ws.on("message", async (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.event === "start") await session.start(msg.start);
-        else if (msg.event === "media" && session.el) {
-          try {
-            const pcm = mulawToLinear16(
-              Buffer.from(msg.media.payload, "base64"),
-            );
-            session.el.sendAudio(pcm.toString("base64"));
-          } catch (audioErr) {
-            log.error("Audio conversion error", { err: audioErr.message });
-          }
-        } else if (msg.event === "stop") session.stop("telephony-stop");
-      } catch (e) {
-        log.error("Message parsing error", { err: e.message });
-      }
+function createBridge(httpServer, { path = '/media-stream' } = {}) {
+  const wss = new WebSocket.Server({ server: httpServer, path });
+  wss.on('connection', (ws, req) => {
+    const clientIp = req.socket.remoteAddress;
+    if (incrementIpCount(clientIp) > MAX_WS_PER_IP) {
+       decrementIpCount(clientIp);
+       return ws.close();
+    }
+    const session = new BridgeSession(ws, clientIp);
+    ws.on('message', async (data) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.event === 'start') await session.onTwilioStart(msg.start);
+      else if (msg.event === 'media') session.onTwilioMedia(msg.media);
+      else if (msg.event === 'stop') session.onTwilioStop();
     });
-    ws.on("close", () => session.stop("ws-closed"));
+    ws.on('close', () => session.destroy('ws-closed'));
   });
   return wss;
 }
 
-module.exports = { createBridge, getBridgeStats: () => ({}) };
+module.exports = { createBridge, getBridgeStats: () => ({}), BridgeSession };
