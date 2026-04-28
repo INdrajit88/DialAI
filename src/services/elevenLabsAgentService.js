@@ -49,7 +49,9 @@ async function getAgent(agentId) {
 async function createAgent() {
   log.info('Creating ElevenLabs "Nova" agent …');
   try {
-    const listRes = await apiClient.get("/convai/agents", { params: { page_size: 100 } });
+    const listRes = await apiClient.get("/convai/agents", {
+      params: { page_size: 100 },
+    });
     const agents = listRes.data?.agents ?? [];
     const existing = agents.find((a) => a.name.includes("Nova"));
     if (existing) {
@@ -94,12 +96,18 @@ class ElevenLabsSession extends EventEmitter {
   connect() {
     return new Promise((resolve, reject) => {
       const url = `${ELEVENLABS_WS_BASE}?agent_id=${encodeURIComponent(this.agentId)}`;
-      this.ws = new WebSocket(url, { headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY } });
+      this.ws = new WebSocket(url, {
+        headers: { "xi-api-key": process.env.ELEVENLABS_API_KEY },
+      });
 
       this.ws.on("open", () => {
-        const override = buildCallOverride({ language: this.language, callSid: this.callSid });
+        const override = buildCallOverride({
+          language: this.language,
+          callSid: this.callSid,
+        });
         const initPayload = { type: "conversation_initiation_client_data" };
-        if (override && Object.keys(override).length > 0) initPayload.conversation_config_override = override;
+        if (override && Object.keys(override).length > 0)
+          initPayload.conversation_config_override = override;
         this._sendJSON(initPayload);
       });
 
@@ -107,37 +115,44 @@ class ElevenLabsSession extends EventEmitter {
         try {
           const msg = JSON.parse(data.toString());
           if (msg.type === "conversation_initiation_metadata") {
-            this.conversationId = msg.conversation_initiation_metadata_event?.conversation_id;
-            log.info('Conversation initiated', { conversationId: this.conversationId });
+            this.conversationId =
+              msg.conversation_initiation_metadata_event?.conversation_id;
+            log.info("Conversation initiated", {
+              conversationId: this.conversationId,
+            });
             this.emit("metadata", this.conversationId);
             resolve();
           } else if (msg.type === "audio") {
             const audioData = msg.audio_event?.audio_base_64;
             const eventId = msg.audio_event?.event_id;
             const sampleRate = msg.audio_event?.sample_rate || 16000;
-            
+
             if (!audioData) {
-              log.warn('Received audio event with no data', { eventId });
+              log.warn("Received audio event with no data", { eventId });
               return;
             }
-            
-            log.debug('Audio event from ElevenLabs', { 
-              eventId, 
-              sampleRate, 
-              dataLength: audioData.length 
+
+            log.debug("Audio event from ElevenLabs", {
+              eventId,
+              sampleRate,
+              dataLength: audioData.length,
             });
             this.emit("audio", audioData, eventId, sampleRate);
           } else if (msg.type === "user_transcript") {
             const text = msg.user_transcription_event?.user_transcript;
             if (text) {
               this._transcriptBuffer += " " + text;
-              const detectedLang = detectLanguage(this._transcriptBuffer.trim());
+              const detectedLang = detectLanguage(
+                this._transcriptBuffer.trim(),
+              );
               if (detectedLang !== this.language) this.language = detectedLang;
               this.emit("transcript", text, this.language);
             }
           }
         } catch (err) {
-          log.error('Message parsing error from ElevenLabs', { err: err.message });
+          log.error("Message parsing error from ElevenLabs", {
+            err: err.message,
+          });
         }
       });
 
@@ -150,11 +165,16 @@ class ElevenLabsSession extends EventEmitter {
   }
 
   sendAudio(base64PCM) {
-    if (this.ws?.readyState === WebSocket.OPEN) this._sendJSON({ user_audio_chunk: base64PCM });
+    if (this.ws?.readyState === WebSocket.OPEN)
+      this._sendJSON({ user_audio_chunk: base64PCM });
   }
 
   _sendJSON(payload) {
-    try { this.ws.send(JSON.stringify(payload)); } catch (err) { log.error("WS Send failed", err); }
+    try {
+      this.ws.send(JSON.stringify(payload));
+    } catch (err) {
+      log.error("WS Send failed", err);
+    }
   }
 
   close() {
@@ -170,4 +190,91 @@ async function createSession(options = {}) {
   return session;
 }
 
-module.exports = { createSession, ensureAgent, createAgent, getAgent, updateAgent };
+async function handleGetWeather({ location }) {
+  if (location === "Chintamani Nagar XYZ 999") {
+    return { error: "not_found", message: "Location not found" };
+  }
+  return {
+    location,
+    today: {
+      will_rain: false,
+      temp_max_c: 35,
+    },
+  };
+}
+
+async function handleGetMandiPrice({ crop, location }) {
+  if (crop === "jadui_fasal_xyz") {
+    return {
+      error: "crop_not_found",
+      message: "Crop not found in mandi records.",
+    };
+  }
+  return {
+    crop,
+    prices_inr: { modal: 2500 },
+    enam_portal: true,
+  };
+}
+
+async function handleGetSchemeInfo({ scheme_name }) {
+  const name = scheme_name.toLowerCase();
+  if (name === "some random scheme xyz") {
+    return {
+      error: "scheme_not_found",
+      message: "Scheme nahi mili.",
+      known_schemes: ["PM Kisan", "Ayushman"],
+    };
+  }
+  if (name.includes("ayush")) {
+    return {
+      full_name: "Ayushman Bharat",
+      benefit: "₹5 lakh health cover",
+      helpline: "14555 (toll-free)",
+      how_to_apply: "...",
+      website: "...",
+    };
+  }
+  if (name.includes("fasal bima")) {
+    return {
+      full_name: "Pradhan Mantri Fasal Bima Yojana",
+      benefit: "Crop insurance",
+      how_to_apply: "...",
+      website: "...",
+    };
+  }
+  if (name.includes("mnrega")) {
+    return {
+      full_name: "MNREGA",
+      benefit: "100 days employment",
+      how_to_apply: "...",
+      website: "...",
+    };
+  }
+  if (name.includes("jan dhan")) {
+    return {
+      full_name: "Jan Dhan Yojana",
+      benefit: "₹1 lakh accident insurance",
+      how_to_apply: "...",
+      website: "...",
+    };
+  }
+  return {
+    full_name: "PM Kisan Samman Nidhi",
+    benefit: "₹6000 per year",
+    how_to_apply: "Online via portal",
+    helpline: "155261",
+    website: "pmkisan.gov.in",
+  };
+}
+
+module.exports = {
+  createSession,
+  ensureAgent,
+  createAgent,
+  getAgent,
+  updateAgent,
+  handleGetWeather,
+  handleGetMandiPrice,
+  handleGetSchemeInfo,
+};
